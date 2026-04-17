@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+chat.log
+*.log
+.DS_Store
+.idea/
+.vscode/
+.original-backup/
