@@ -1,12 +1,3 @@
-"""
-Inbound side of a chat: listens on port 6001 for TCP connections from peers
-and handles each incoming message. Supports plaintext messages as well as
-the per-message Diffie-Hellman handshake defined in `eha_initiator.py`.
-
-Every incoming connection is handled on its own thread so that one slow
-peer cannot block delivery of messages from other peers.
-"""
-
 import json
 import socket
 import threading
@@ -20,80 +11,72 @@ from dh import (
 from encryption import decrypt_message, InvalidToken
 
 
-def _send_line(sock_file, payload: dict) -> None:
-    sock_file.write((json.dumps(payload) + "\n").encode("utf-8"))
-    sock_file.flush()
+def _send_line(f, payload):
+    f.write((json.dumps(payload) + "\n").encode("utf-8"))
+    f.flush()
 
 
-def _recv_line(sock_file) -> dict:
-    line = sock_file.readline()
+def _recv_line(f):
+    line = f.readline()
     if not line:
         return {}
     return json.loads(line.decode("utf-8"))
 
 
 def chat_responder(app, listen_port=6001):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("", listen_port))
-    server_socket.listen()
-    print(f"[responder] listening on port {listen_port}")
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("", listen_port))
+    server.listen()
+    print(f"listening on port {listen_port}")
 
     while True:
-        conn, addr = server_socket.accept()
-        threading.Thread(
-            target=_handle_connection,
-            args=(conn, addr, app),
-            daemon=True,
-        ).start()
+        conn, addr = server.accept()
+        # one thread per connection so a slow peer can't block the others
+        threading.Thread(target=_handle, args=(conn, addr, app), daemon=True).start()
 
 
-def _handle_connection(conn, addr, app):
+def _handle(conn, addr, app):
     peer_ip = addr[0]
     try:
         conn.settimeout(10)
         with conn:
-            sock_file = conn.makefile("rwb")
-            first = _recv_line(sock_file)
+            f = conn.makefile("rwb")
+            first = _recv_line(f)
             if not first:
                 return
 
-            msg_type = first.get("type")
-            if msg_type == "plaintext":
+            t = first.get("type")
+            if t == "plaintext":
                 sender = first.get("sender", peer_ip)
                 text = first.get("message", "")
-                print(f"[responder] plaintext from {sender}@{peer_ip}: {text}")
                 app.master.after(0, app.display_chat_message, sender, text)
                 app.master.after(0, app.store_message, sender, text)
 
-            elif msg_type == "handshake":
+            elif t == "handshake":
                 sender = first.get("sender", peer_ip)
-                peer_public_pem = public_key_from_wire(first["public_key"])
-
+                peer_public = public_key_from_wire(first["public_key"])
                 private_key, my_public_pem = generate_keypair()
-                _send_line(sock_file, {
+                _send_line(f, {
                     "type": "handshake_ack",
                     "public_key": public_key_to_wire(my_public_pem),
                 })
+                key = derive_fernet_key(private_key, peer_public)
 
-                key = derive_fernet_key(private_key, peer_public_pem)
-
-                ciphertext_msg = _recv_line(sock_file)
-                if ciphertext_msg.get("type") != "ciphertext":
-                    print(f"[responder] unexpected message after handshake: {ciphertext_msg}")
+                ct = _recv_line(f)
+                if ct.get("type") != "ciphertext":
                     return
-
                 try:
-                    plaintext = decrypt_message(key, ciphertext_msg["token"])
+                    plaintext = decrypt_message(key, ct["token"])
                 except InvalidToken:
-                    print(f"[responder] bad token from {peer_ip} — key mismatch or tampering")
+                    print(f"invalid token from {peer_ip}")
                     return
 
-                print(f"[responder] encrypted from {sender}@{peer_ip}: {plaintext}")
                 app.master.after(0, app.display_chat_message, sender, plaintext)
                 app.master.after(0, app.store_message, sender, "<Encrypted>")
 
             else:
-                print(f"[responder] unknown message type from {peer_ip}: {first}")
+                print(f"unknown message type from {peer_ip}: {first}")
+
     except (OSError, ValueError, json.JSONDecodeError, KeyError) as err:
-        print(f"[responder] error handling connection from {peer_ip}: {err}")
+        print(f"responder error from {peer_ip}: {err}")

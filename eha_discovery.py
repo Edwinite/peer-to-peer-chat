@@ -1,15 +1,3 @@
-"""
-UDP peer discovery.
-
-Listens on the broadcast port for announcements from other peers and keeps a
-dictionary mapping peer-ip -> (username, status). Peers that haven't been heard
-from for a while are marked "away"; new announcements flip them back to "active".
-
-All UI updates go through `app.master.after(0, ...)` because this module runs
-on a background thread and Tk widgets are only safe to touch from the main
-thread.
-"""
-
 import json
 import socket
 import threading
@@ -28,26 +16,24 @@ def peer_discovery(app, listen_port=6000):
     last_seen = {}   # ip -> timestamp
     lock = threading.Lock()
 
-    def sweep_for_away_peers():
+    def sweep():
         while True:
             time.sleep(SWEEP_INTERVAL_SECONDS)
             now = time.time()
             with lock:
                 for ip, seen in list(last_seen.items()):
                     if now - seen > AWAY_AFTER_SECONDS and ip in peers:
-                        username, _ = peers[ip]
-                        peers[ip] = (username, "away")
+                        peers[ip] = (peers[ip][0], "away")
                 snapshot = dict(peers)
             app.master.after(0, app.update_user_list, snapshot)
 
-    threading.Thread(target=sweep_for_away_peers, daemon=True).start()
+    threading.Thread(target=sweep, daemon=True).start()
 
     while True:
         try:
             data, addr = listener.recvfrom(1024)
             info = json.loads(data.decode("utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as err:
-            print(f"[discovery] ignoring malformed packet: {err}")
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
 
         username = info.get("username")
